@@ -31,10 +31,17 @@ from time import sleep, time as timestamp
 from datetime import datetime
 from threading import Thread, Event
 from struct import pack as pack_data
+from enum import Enum
 
 # External imports:
 import numpy as np
 import serial
+
+
+class MountType(Enum):
+    ALTAZ = 1
+    EQ    = 2
+
 
 class Mount:
     """Control a telescope gimbal mount.
@@ -69,9 +76,9 @@ class Mount:
             # Create instance (will auto initialise)
             mount = pypogs.Mount(model='celestron', identity='COM3', name='CPC800')
             # Move to position
-            mount.move_to_alt_az(30, 10) #degrees; by default blocks until finished
+            mount.move_to([30, 10]) #degrees; by default blocks until finished
             # Set gimbal rates
-            mount.set_rate_alt_az(0, -1.5) #degrees per second
+            mount.set_rates([0, -1.5]) #degrees per second
             # Wait for a while
             time.sleep(2)
             # Stop moving
@@ -87,7 +94,8 @@ class Mount:
     """
 
     _supported_models = ('celestron','ascom',)
-
+    
+    
     def __init__(self, model=None, identity=None, name=None, auto_init=True, debug_folder=None):
         """Create Mount instance. See class documentation."""
         # Logger setup
@@ -120,29 +128,39 @@ class Mount:
         self._identity = None
         self._name = 'UnnamedMount'
         self._is_init = False
-        self._max_speed = (4.0, 4.0) #(alt,azi) degrees/sec
+        self._max_speed = (4.0, 4.0) #(azi,alt) or (ra,dec) degrees/sec
         self._alt_limit = (-5, 95) #limit degrees
         self._azi_limit = (None, None) #limit degees
+        self._ra_limit  = (None, None) #limit degees
+        self._dec_limit = (None, None) #limit degees
         self._home_pos = (0, 0) #Home position
-        self._alt_zero = 0 #Amount to subtract from alt.
+        self._zero_pos = (0, 0) #Amount to subtract from each axis.
+        self._mount_type = 1 # type 1 = AltAz, type 2 = equatorial
         # Only used for model celestron
         self._cel_serial_port = None
+        self._cel_command_char = {'goto_az_alt': 'b', 'get_az_alt': 'z', \
+                                  'goto_ra_dec': 'r', 'get_ra_dec': 'e' }
         # Only used for model ascom
-        self._ascom_scope_alt_axis = 1
-        self._ascom_scope_azi_axis = 0
+        self._ascom_canSlewRaDec = None
+        self._ascom_canSlewAltAz = None
+        self._ascom_telescope = None
         # Thread for rate control
         self._control_thread = None
         self._control_thread_stop = True
         # Cache of the state of the mount
-        self._state_cache = {'alt': 0.0, 'azi': 0.0, 'alt_rate': 0.0, 'azi_rate': 0.0}
+        self._state_cache = {'alt': 0.0, 'azi': 0.0, 'alt_rate': 0.0, 'azi_rate': 0.0, \
+                             'dec': 0.0, 'ra':  0.0, 'dec_rate': 0.0, 'ra_rate':  0.0 }
         if name is not None:
             self.name = name
         if model is not None:
             self.model = model
         if identity is not None:
             self.identity = identity
-        if model is not None and identity is not None:
+        if auto_init and model is not None:
+            self._logger.debug('Starting auto-init')
             self.initialize()
+        else:
+            self._logger.debug('Missing information, cannot initialize')
         # Try to get Python to clean up the object properly
         import atexit, weakref
         atexit.register(weakref.ref(self.__del__))
@@ -186,7 +204,7 @@ class Mount:
 
     @property
     def state_cache(self):
-        """dict: Get cache with the current state of the Mount. Updates on calls to get_alt_az() and set_rate_alt_az().
+        """dict: Get cache with the current state of the Mount. Updates on calls to get_pos() and set_rates().
 
         Keys:
             azi: float, alt: float, azi_rate: float, alt_rate: float
@@ -227,6 +245,28 @@ class Mount:
         self._model = model.lower()
         self._logger.debug('Model set to '+str(self.model))
 
+    @property
+    def mount_type(self):
+        """str: Get or set the mount type.
+
+        Supported:
+            1  for alt/az type mounts
+            2  for equatorial type mounts
+        - This will change which coordinate frame is used during tracking.
+        - Must set before initialising the device and may not be changed for an initialised device.
+        """
+        return self._mount_type
+    @mount_type.setter
+    def mount_type(self, mount_type):
+        assert not self.is_init, 'Can not change already intialised mount type'
+        try:
+            type_name = str(MountType._value2member_map_[mount_type])
+        except KeyError:
+            raise AssertionError('Invalid mount type index "'+str(mount_type)+'" (expected 1-'+len(MountType)+')')
+        else:
+            self._logger.debug('Setting mount type to: '+type_name+' ['+str(mount_type)+']')
+            self._mount_type = mount_type
+        
     @property
     def identity(self):
         """str: Get or set the device and/or input. Model must be defined first.
@@ -272,7 +312,9 @@ class Mount:
                 raise AssertionError('Failed to open the serial port named: '+str(identity))
             self._identity = identity
         elif self.model.lower() == 'ascom':
+            self._logger.debug('Attempting to connect to ASCOM device "'+str(self.identity)+'"')
             if not hasattr(self, '_ascom_driver_handler'):
+                self._logger.debug('Loading ASCOM win32com device handler')
                 import win32com.client
                 self._ascom_driver_handler = win32com.client
             ascomDriverName = str()
@@ -289,7 +331,13 @@ class Mount:
                 self._logger.debug("Selected telescope driver: "+ascomDriverName)
                 if not ascomDriverName:            
                     self._logger.debug('User canceled telescope selection')
-            assert ascomDriverName, 'Unable to identify ASCOM telescope.'
+            if not ascomDriverName:
+                raise AssertionError('Failed to identify ASCOM telescope')
+            try:
+                self._ascom_telescope = self._ascom_driver_handler.Dispatch(ascomDriverName)
+                self._ascom_telescope = None
+            except:
+                raise AssertionError('Failed to connect to ASCOM telescope: '+str(ascomDriverName))
             self._identity = ascomDriverName
         else:
             self._logger.warning('Forbidden model string defined.')
@@ -313,33 +361,33 @@ class Mount:
         """tuple of str: Get all the available properties (settings) supported by this device."""
         assert self.is_init, 'Mount must be initialised'
         if self.model.lower() == 'celestron':
-            return ('zero_altitude', 'home_alt_az', 'max_rate', 'alt_limit', 'azi_limit')
+            return ('zero_pos', 'home_pos', 'max_rates', 'alt_limit', 'azi_limit', 'mount_type')
         elif self.model.lower() == 'ascom':
-            return ('zero_altitude', 'home_alt_az', 'max_rate', 'alt_limit', 'azi_limit')
+            return ('zero_pos', 'home_pos', 'max_rates', 'alt_limit', 'azi_limit', 'mount_type')
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
 
     @property
-    def zero_altitude(self):
-        """float: Get or set the zero altitude angle (degrees). Default 0.
+    def zero_pos(self):
+        """float: Get or set the zero position (az,alt) or (ra,dec) angle (degrees). Default (0, 0).
 
         Normally the mount is initialised with the telescope level. In this case zero_altitude is 0. However, if the
         mount is e.g. initialised with the telescope pointing straight up, zero_altitude must be set to +90.
         """
-        return self._alt_zero
-    @zero_altitude.setter
-    def zero_altitude(self, angle):
-        self._logger.debug('Got set zero altitude with: '+str(angle))
-        self._alt_zero = float(angle)
-        self._logger.debug('Alt zero set to: '+str(self._alt_zero))
+        return self._zero_pos
+    @zero_pos.setter
+    def zero_pos(self, angles):
+        self._logger.debug('Got set zero altitude with: '+str(angles))
+        self._zero_pos = float(angles)
+        self._logger.debug('Zero position set to: '+str(self._zero_pos))
 
     @property
-    def home_alt_az(self):
-        """tuple of float: Get or set the home position (altitude, azimuth) in degrees. Default (0, 0)"""
+    def home_pos(self):
+        """tuple of float: Get or set the home position (azimuth, altitude) or (RA, dec) in degrees. Default (0, 0)"""
         return self._home_pos
-    @home_alt_az.setter
-    def home_alt_az(self, pos):
+    @home_pos.setter
+    def home_pos(self, pos):
         self._logger.debug('Got set home pos with: '+str(pos))
         try:
             pos = tuple([float(x) for x in pos])
@@ -347,26 +395,26 @@ class Mount:
         except TypeError:
             pos = (float(pos), float(pos))
         self._home_pos = pos
-        self._logger.debug('Home pos set to: '+str(self.home_alt_az))
+        self._logger.debug('Home pos set to: '+str(self.home_pos))
 
     @property
-    def max_rate(self):
-        """tuple of float: Get or set the max slew rate (degrees per second) for the axes (altitude, azimith).
+    def max_rates(self):
+        """tuple of float: Get or set the max slew rate (degrees per second) for the axes (azi, alt) or (RA, dec).
         Default (4.0, 4.0).
 
         If a scalar is set, both axes' rates will be set to this value.
         """
         return self._max_speed
-    @max_rate.setter
-    def max_rate(self, maxrate):
-        self._logger.debug('Got set max rate with: '+str(maxrate))
+    @max_rates.setter
+    def max_rates(self, maxrates):
+        self._logger.debug('Got set max rates with: '+str(maxrates))
         try:
-            maxrate = tuple([float(x) for x in maxrate])
-            assert len(maxrate)==2
+            maxrates = tuple([float(x) for x in maxrates])
+            assert len(maxrates)==2
         except TypeError:
-            maxrate = (float(maxrate), float(maxrate))
-        self._max_speed = maxrate
-        self._logger.debug('Set max to: '+str(self.max_rate))
+            maxrates = (float(maxrates), float(maxrates))
+        self._max_speed = maxrates
+        self._logger.debug('Set max to: '+str(self.max_rates))
 
     @property
     def alt_limit(self):
@@ -403,12 +451,25 @@ class Mount:
                            , float(azilim[1]) if azilim[1] is not None else None)
         self._logger.debug('Set azi limit to: '+str(self._azi_limit))
 
+    @property
+    def mount_type(self):
+        """float: Get or set the mount type (ALTAZ or EQ).
+        """
+        return self._mount_type
+    @mount_type.setter
+    def mount_type(self, mount_type):
+        self._logger.debug('Got set mount type with: '+str(mount_type))
+        self._mount_type = mount_type
+        self._logger.debug('Mount type set to: '+str(self._mount_type))
+        
     def initialize(self):
-        """Initialise (make ready to start) the device. The model and identity must be defined."""
+        """Initialise (make ready to start) the device. The model must be defined."""
         self._logger.debug('Initialising')
         assert not self.is_init, 'Already initialised'
-        assert not None in (self.model, self.identity), 'Must define model and identity before initialising'
+        #assert not None in (self.model, self.identity), 'Must define model and identity before initialising'
+        assert not None in (self.model, ), 'Must define model before initialising'
         if self.model == 'celestron':
+            assert not None in (self.identity), 'Must define identity before initialising'
             self._logger.debug('Using Celestron, try to initialise')
             try:
                 self._cel_serial_port = serial.Serial(self.identity, 9600, parity=serial.PARITY_NONE,\
@@ -426,25 +487,51 @@ class Mount:
             self._cel_tracking_off()
             self._is_init = True
         elif self.model.lower() == "ascom":
-            ascomDriverName = self.identity;
-            self._logger.debug('Attempting to connect to ASCOM device "'+ascomDriverName+'"')
+            if self._ascom_telescope is not None:
+                raise RuntimeError('There is already an ASCOM telescope object here')
+            self._logger.debug('Attempting to connect to ASCOM device "'+str(self.identity)+'"')
+            if not hasattr(self, '_ascom_driver_handler'):
+                import win32com.client
+                self._ascom_driver_handler = win32com.client 
+            if self.identity is not None:
+                self._logger.debug('Specified identity: "'+str(self.identity)+'" ['+str(len(self.identity))+']')
+                if self.identity.startswith('ASCOM'):
+                    ascomDriverName = self.identity
+                else:
+                    ascomDriverName = 'ASCOM.'+str(self.identity)+'.telescope'
+            else:
+                ascomSelector = self._ascom_driver_handler.Dispatch("ASCOM.Utilities.Chooser")
+                ascomSelector.DeviceType = 'Telescope'
+                ascomDriverName = ascomSelector.Choose('None')
+                self._logger.debug("Selected telescope driver: "+ascomDriverName)
+                if not ascomDriverName:            
+                    self._logger.debug('User canceled telescope selection')
+            assert ascomDriverName, 'Unable to identify ASCOM telescope.'
             self._logger.debug('Loading ASCOM telescope driver: '+ascomDriverName)
             self._ascom_telescope = self._ascom_driver_handler.Dispatch(ascomDriverName)
+            assert self._ascom_telescope is not None, 'Failed to intialize ASCOM telescope'
             assert hasattr(self._ascom_telescope, 'Connected'), "Unable to access telescope driver"
             self._logger.debug('Connecting to telescope')
-            assert self._ascom_telescope is not None, 'Faile to intialize ASCOM telescope'
             self._ascom_telescope.Connected = True
             assert self._ascom_telescope.Connected, "Failed to connect to telescope"
             self._logger.debug('Connected to ASCOM telescope')
             if hasattr(self._ascom_telescope, 'CanSetTracking') and self._ascom_telescope.CanSetTracking:
-                self._ascom_telescope.Tracking = False
+                self._ascom_telescope.Tracking = False  #turn off tracking
+            try:
+                self._ascom_canSlewAltAz = self._ascom_telescop.CanSlewAltAz
+            except:
+                self._ascom_canSlewAltAz = False
+            try:
+                self._ascom_canSlewRaDec = self._ascom_telescop.CanSlew
+            except:
+                self._ascom_canSlewRaDec = False          
             self._is_init = True
         else:
             self._logger.warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
         self._logger.info('Mount initialised.')
         try:
-            self.get_alt_az() #Get cache to update
+            self.get_pos() #Get cache to update
         except AssertionError:
             self._logger.debug('Failed to set state cache', exc_info=True)
 
@@ -500,55 +587,69 @@ class Mount:
             self._logger.warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
 
-    def move_to_alt_az(self, alt, azi, block=True, rate_control=True):
+    def move_home(self, block=True, rate_control=True):
+        """Move to the position defined by Mount.home_pos.
+
+        Args:
+            block (bool, optional): If True (the default) the call to this method will block until the move is finished.
+            rate_control (bool, optional): If True (the default) the rate of the mount will be controlled until position
+                is reached, if False the position command will be sent to the mount for excecution.
+        """
+        self.move_to(self.home_pos, block=block, rate_control=rate_control)
+            
+    def move_to(self, pos, block=True, rate_control=True):
         """Move the mount to the given position. Must be initialised.
 
         Args:
-            alt (float): Altitude angle (degrees).
-            azi (float): Azimuth angle (degrees).
+            tuple of float:   (Azimuth, Altitude) in degrees if mount type is Alt/Az, or
+                              (Right-Ascension, Declination) in degrees if mount type is Equatorial.
             block (bool, optional): If True (the default) the call to this method will block until the move is finished.
             rate_control (bool, optional): If True (the default) the rate of the mount will be controlled until position
                 is reached, if False the position command will be sent to the mount for excecution.
         """
         assert self.is_init, 'Must be initialised'
-        assert self._alt_limit[0] is None or alt >= self._alt_limit[0], 'Altitude outside range!'
-        assert self._alt_limit[1] is None or alt <= self._alt_limit[1], 'Altitude outside range!'
-        assert self._azi_limit[0] is None or azi >= self._azi_limit[0], 'Azimuth outside range!'
-        assert self._azi_limit[1] is None or azi <= self._azi_limit[1], 'Azimuth outside range!'
-        self._logger.debug('Got move command with: alt=' + str(alt) + ' azi=' + str(azi) + ' block='+str(block) \
-                           + ' rate_control=' + str(rate_control))
+        if self.mount_type == MountType.ALTAZ:
+            assert self._azi_limit[0] is None or pos[0] >= self._azi_limit[0], 'Azimuth outside range!'
+            assert self._azi_limit[1] is None or pos[0] <= self._azi_limit[1], 'Azimuth outside range!'
+            assert self._alt_limit[0] is None or pos[1] >= self._alt_limit[0], 'Altitude outside range!'
+            assert self._alt_limit[1] is None or pos[1] <= self._alt_limit[1], 'Altitude outside range!'
+            self._logger.debug('Got move command with: azi=' + str(pos[0]) + ' alt=' + str(pos[1]) + ' block='+str(block) \
+                               + ' rate_control=' + str(rate_control))
+        elif self.mount_type == MountType.EQ:
+            assert self._ra_limit[0]  is None or pos[0] >= self._ra_limit[0], 'RA outside range!'
+            assert self._ra_limit[1]  is None or pos[0] <= self._ra_limit[1], 'RA outside range!'
+            assert self._dec_limit[0] is None or pos[1] >= self._dec_limit[0], 'Dec outside range!'
+            assert self._dec_limit[1] is None or pos[1] <= self._dec_limit[1], 'Dec outside range!'
+            self._logger.debug('Got move command with: RA=' + str(pos[0]) + ' dec=' + str(pos[1]) + ' block='+str(block) \
+                               + ' rate_control=' + str(rate_control))
         self._logger.debug('Stopping mount first')
         self.stop()
         if self.model == 'celestron' or self.model.lower() == "ascom":
-            self._logger.debug('Using celestron, ensure range -180 to 180')
-            alt = self.degrees_to_n180_180(alt - self._alt_zero)
-            alt = self.degrees_to_n180_180(alt)
-            azi = self.degrees_to_n180_180(azi)
+            self._logger.debug('Adjust range to -180 to 180')
+            pos[0] = self.degrees_to_n180_180(pos[0] - self._zero_pos[0])
+            pos[1] = self.degrees_to_n180_180(pos[1] - self._zero_pos[1])
             
-        self._logger.debug('Will command: alt=' + str(alt) + ' azi=' + str(azi))
+        self._logger.debug('Will command: alt=' + str(pos[1]) + ' azi=' + str(azi))
         if rate_control: #Use own control thread
             self._logger.debug('Starting rate controller')
             Kp = 1.5
             self._control_thread_stop = False
             success = [False]
-            def _loop_slew_to(alt, azi, success):
+            def _loop_slew_to(pos, success):
                 while not self._control_thread_stop:
-                    curr_pos = self.get_alt_az()
-                    eAlt = Kp * self.degrees_to_n180_180(alt - curr_pos[0])
-                    eAzi = Kp * self.degrees_to_n180_180(azi - curr_pos[1])
-                    if eAlt < -self._max_speed[0]: eAlt = -self._max_speed[0]
-                    if eAlt > self._max_speed[0]: eAlt = self._max_speed[0]
-                    if eAzi < -self._max_speed[1]: eAzi = -self._max_speed[1]
-                    if eAzi > self._max_speed[1]: eAzi = self._max_speed[1]
-
-                    if abs(eAlt)<.001 and abs(eAzi)<.001:
-                        self.set_rate_alt_az(0, 0)
+                    curr_pos = self.get_pos()
+                    ePos = []
+                    for idx in [0, 1]:
+                        ePos[idx] = Kp * self.degrees_to_n180_180(pos[idx] - curr_pos[idx])
+                        if ePos[idx] < -self._max_speed[idx]: ePos[idx] = -self._max_speed[idx]
+                        if ePos[idx] >  self._max_speed[idx]: ePos[idx] =  self._max_speed[idx]
+                        if abs(ePos[idx])<.001:  ePos[idx] = 0                            
+                    self.set_rates(ePos)
+                    if ePos[0]==0 and ePos[1]==0:
                         success[0] = True
                         break
-                    else:
-                        self.set_rate_alt_az(eAlt, eAzi)
                 self._control_thread_stop = True
-            self._control_thread = Thread(target=_loop_slew_to, args=(alt, azi, success))
+            self._control_thread = Thread(target=_loop_slew_to, args=(pos, success))
             self._control_thread.start()
             if block:
                 self._logger.debug('Waiting for thread to finish')
@@ -557,9 +658,9 @@ class Mount:
         else:
             self._logger.debug('Sending move command to mount')
             success = [False]
-            def _move_to_alt_az(alt, azi, success):
-                success[0] = command_to_alt_az(alt, azi)
-            t = Thread(target=_move_to_alt_az, args=(alt, azi, success))
+            def _move_to(pos, success):
+                success[0] = command_to_pos(pos)
+            t = Thread(target=_move_to, args=(pos, success))
             t.start()
             t.join()
             assert success[0], 'Failed communicating with mount'
@@ -568,22 +669,25 @@ class Mount:
                 self._logger.debug('Waiting for mount to finish')
                 self.wait_for_move_to()
 
-    def command_to_alt_az(self, alt, azi):
-        """Command the mount to slew to alt/az coordinates. Must be initialised.
+    def command_to(self, pos):
+        """Command the mount to slew to (azi, alt) or (RA, dec) coordinates. Must be initialised.
 
         Args:
-            alt (float): Altitude (degrees).
-            azi (float): Azimuth (degrees).
+            tuple of float:  (azi, alt) or (RA, dec) target coordinates (degrees).
         """
         assert self.is_init, 'Must be initialised'
         if self.model == 'celestron':
-            #azi = azi %360 #Mount uses 0-360
             # TODO check alt zero correct
-            altRaw = int(self.degrees_to_0_360(alt - self._alt_zero) / 360 * 2**32) & 0xFFFFFF00
-            aziRaw = int(self.degrees_to_0_360(azi) / 360 * 2**32) & 0xFFFFFF00
-            altFormatted = '{0:0{1}X}'.format(altRaw,8)
-            aziFormatted = '{0:0{1}X}'.format(aziRaw,8)
-            command = 'b' + aziFormatted + ',' + altFormatted
+            cmd_str_pos = []
+            for idx in [1, 2]:
+                adjusted_angle = int(self.degrees_to_0_360(pos[idx] - self._zero_pos[idx]) / 360 * 2**32) & 0xFFFFFF00
+                cmd_str_pos[idx] = '{0:0{1}X}'.format(adjusted_angle,8)
+            if self.mount_type == MountType.ALTAZ:
+                command_char = self._cel_command_char['goto_az_alt']
+            elif self.mount_type == MountType.EQ:
+                command_char = self._cel_command_char['goto_ra_dec']
+            command = command_char + cmd_str_pos[0] + ',' + cmd_str_pos[1]
+            self._logger.debug('Sending go-to command: '+command)
             self._cel_send_text_command(command)
             if self._cel_check_ack():
                 self._logger.debug('Mount acknowledged')
@@ -592,31 +696,31 @@ class Mount:
                 self._logger.debug('Mount acknowledged')
                 return False
         elif self.model.lower() == "ascom":
-            if not self._ascom_telescope.CanSlewAltAz:
-                raise RuntimeError('ASCOM mount does not support alt/az go-to commanding')
-                return False
             if self._ascom_telescope.AtPark:
-                raise RuntimeError('ASCOM mount is parked; cannot command alt/az slew')
+                raise RuntimeError('ASCOM mount is parked; cannot command go-to slew')
                 return False
             if self._ascom_telescope.Tracking:
-                raise RuntimeError('ASCOM mount is tracking; cannot command alt/az slew')
-                return False                
-            self._ascom_telescope.SlewToAltAz(alt, azi)
+                raise RuntimeError('ASCOM mount is tracking; cannot command go-to slew')
+                return False
+            if self.mount_type == MountType.ALTAZ:
+                self._ascom_telescope.SlewToAltAz(pos[0], pos[1])
+            elif self.mount_type == MountType.EQ:
+                self._ascom_telescope.SlewToTarget(pos[0], pos[1])
             return True
         else:
             self._logger.warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
             
-    def get_alt_az(self):
-        """Get the current alt and azi angles of the mount.
+    def get_pos(self):
+        """Get the current (azi, alt) or (RA, dec) angles of the mount.
 
         Returns:
-            tuple of float: the (altitude, azimuth) angles of the mount in degrees (-180, 180].
+            tuple of float: the (azi, alt) or (RA, dec) angles of the mount in degrees (-180, 180].
         """
         assert self.is_init, 'Must be initialised'
         if self.model == 'celestron':
             self._logger.debug('Using celestron, requesting mount position')
-            def _get_alt_az(ret):
+            def _get_pos(ret):
                 command = bytes([ord('z')]) #Get precise AZM-ALT
                 self._cel_serial_port.write(command)
                 # The command returns ASCII encoded text of HEX values!
@@ -625,7 +729,7 @@ class Mount:
                 ret[0] = int(r2[1], 16)
                 ret[1] = int(r2[0], 16)
             ret = [None, None]
-            t = Thread(target=_get_alt_az, args=(ret,))
+            t = Thread(target=_get_pos, args=(ret,))
             t.start()
             t.join()
             alt = self.degrees_to_n180_180( float(ret[0]) / 2**32 * 360 + self._alt_zero)
@@ -645,76 +749,61 @@ class Mount:
             return (alt, azi)            
         else:
             self._logger.warning('Forbidden model string defined.')
-            raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
-
-    def move_home(self, block=True, rate_control=True):
-        """Move to the position defined by Mount.home_alt_az.
-
-        Args:
-            block (bool, optional): If True (the default) the call to this method will block until the move is finished.
-            rate_control (bool, optional): If True (the default) the rate of the mount will be controlled until position
-                is reached, if False the position command will be sent to the mount for excecution.
-        """
-        self.move_to_alt_az(*self.home_alt_az, block=block, rate_control=rate_control)
-
-    def set_rate_alt_az(self, alt, azi):
-        """Set the mount slew rate. Must be initialised.
+            raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))       
+        
+    def set_rates(self, rates):
+        """Set the mount slew rates. Must be initialised.
 
         Args:
-            alt (float): Altitude rate (degrees per second).
-            azi (float): Azimuth rate (degrees per second).
+            tuple of float:  (azi, alt) or (RA, dec) rates (degrees per second).
         """
         assert self.is_init, 'Must be initialised'
-        self._logger.debug('Got rate command. alt=' + str(alt) + ' azi=' + str(azi))
-        if (abs(alt) > self._max_speed[0]) or  (abs(azi) > self._max_speed[0]):
+        
+        self._logger.debug('Got rate command. (' + str(rates[0]) + ', ' + str(rates[1]) + ') degrees/sec')
+        if (abs(rates[0]) > self._max_speed[0]) or  (abs(rates[1]) > self._max_speed[1]):
             raise ValueError('Above maximum speed!')
         if self.model == 'celestron':
             self._logger.debug('Using celestron, sending rate command to mount')
             success = [False]
-            def _set_rate_alt_az(alt, azi, success):
-                #Altitude
-                rate = int(round(alt*3600*4))
-                if rate >= 0:
-                    rateLo = rate & 0xFF
-                    rateHi = rate>>8 & 0xFF
-                    self._cel_send_bytes_command([ord('P'),3,17,6,rateHi,rateLo,0,0])
-                else:
-                    rateLo = -rate & 0xFF
-                    rateHi = -rate>>8 & 0xFF
-                    self._cel_send_bytes_command([ord('P'),3,17,7,rateHi,rateLo,0,0])
-                assert self._cel_check_ack(), 'Mount did not acknowledge!'
-                #Azimuth
-                rate = int(round(azi*3600*4))
-                if rate >= 0:
-                    rateLo = rate & 0xFF
-                    rateHi = rate>>8 & 0xFF
-                    self._cel_send_bytes_command([ord('P'),3,16,6,rateHi,rateLo,0,0])
-                else:
-                    rateLo = -rate & 0xFF
-                    rateHi = -rate>>8 & 0xFF
-                    self._cel_send_bytes_command([ord('P'),3,16,7,rateHi,rateLo,0,0])
-                assert self._cel_check_ack(), 'Mount did not acknowledge!'
+            def _set_rates(rates, success):
+                #Az or RA:
+                for idx in [0, 1]:
+                    rate = int(round(rates[idx]*3600*4))
+                    if rate >= 0:
+                        rateLo = rate[0] & 0xFF
+                        rateHi = rate[0]>>8 & 0xFF
+                        self._cel_send_bytes_command([ord('P'),3,16+idx,6,rateHi,rateLo,0,0])
+                    else:
+                        rateLo = -rate & 0xFF
+                        rateHi = -rate>>8 & 0xFF
+                        self._cel_send_bytes_command([ord('P'),3,16+idx,7,rateHi,rateLo,0,0])
+                    assert self._cel_check_ack(), 'Mount did not acknowledge!'
                 success[0] = True
-            t = Thread(target=_set_rate_alt_az, args=(alt, azi, success))
+            t = Thread(target=_set_rates, args=(rates, success))
             t.start()
             t.join()
             assert success[0], 'Failed communicating with mount'
             self._logger.debug('Send successful')
-            self._state_cache['alt_rate'] = alt
-            self._state_cache['azi_rate'] = azi
         elif self.model.lower() == "ascom":
             success = [False]
             try:
-                self._ascom_telescope.MoveAxis(self._ascom_scope_alt_axis, alt)
-                self._ascom_telescope.MoveAxis(self._ascom_scope_azi_axis, azi)
+                self._ascom_telescope.MoveAxis(0, rates[0])
+                self._ascom_telescope.MoveAxis(1, rates[1])
                 success[0] = True
             except:
-                self._logger.warning('Alt/az rate commanding failed.')
+                self._logger.warning('ASCOM mount rate commanding failed.')
                 success[0] = False
         else:
             self._logger.warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
-
+        if success[0]:
+            if self._mount_type == MountType.ALTAZ:
+                self._state_cache['azi_rate'] = rates[0]
+                self._state_cache['alt_rate'] = rates[1]
+            elif self._mount_type == MountType.EQ:
+                self._state_cache['ra_rate'] = rates[0]
+                self._state_cache['dec_rate'] = rates[1]
+            
     def stop(self):
         """Stop moving."""
         assert self.is_init, 'Must be initialised'
@@ -725,7 +814,7 @@ class Mount:
             self._control_thread.join()
             self._logger.debug('Stopped')
         self._logger.debug('Sending zero rate command')
-        self.set_rate_alt_az(0, 0)
+        self.set_rates([0, 0])
         self._logger.debug('Stopped mount')
 
     def wait_for_move_to(self, timeout=120):
