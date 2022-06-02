@@ -1,0 +1,33 @@
+# Documents
+/docs/_*
+/docs/*.log
+
+# Cache
+*__pycache__*
+
+# Personal
+*my_*
+/my_&
+*My*
+
+# System data and debug
+/pypogs/data/*
+/pypogs/debug/*
+*.txt
+
+# Builds
+/build/*
+/dist/*
+*egg-info*
+
+# Settings
+/setup.cfg
+
+# Exclude custom tetra3 databases (except default_database.npz)
+*.npz                  
+!default_database.npz
+
+#Exclude tetra3 source database files (tyc_main.dat, hip_main.dat)
+*.dat                  
+*.pyc
+tetra3
