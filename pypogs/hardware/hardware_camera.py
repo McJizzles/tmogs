@@ -26,7 +26,6 @@ License:
     See the License for the specific language governing permissions and
     limitations under the License.
 """
-
 # Standard imports:
 from pathlib import Path
 import logging
@@ -34,11 +33,13 @@ from time import sleep, time as timestamp, perf_counter as precision_timestamp
 from datetime import datetime
 from threading import Thread, Event
 from struct import pack as pack_data
+from turtle import end_fill
 
 
 # External imports:
 import numpy as np
 import serial
+import picamera
 
 # Hardware support imports:
 import zwoasi
@@ -87,7 +88,7 @@ class Camera:
             # Release the hardware
             cam.deinitialize()
     """
-    _supported_models = ('ptgrey','zwoasi','ascom')
+    _supported_models = ('ptgrey','zwoasi','ascom', 'picam')
     _default_model = 'zwoasi'
 
     def __init__(self, model=None, identity=None, name=None, auto_init=True, debug_folder=None, properties=[]):
@@ -142,6 +143,9 @@ class Camera:
         self._ascom_driver_handler = None
         self._ascom_camera = None
         self._exposure_sec = 0.1
+        # #Only used for picam
+        # self._picam_camera = None
+
         #Callbacks on image event
         self._call_on_image = set()
         self._got_image_event = Event()
@@ -257,12 +261,7 @@ class Camera:
             self._ascom_camera = None
         self._log_debug('ASCOM camera hardware released')
 
-    def _picam_release(self):
-        """PRIVATE: Release ASCOM hardware resources."""
-        self._log_debug('PI camera release called')
-        if self._picam_camera is not None:
-            if self._picam_camera.Connected:
-                if self._picam_camera.CanAbortExposure:       
+    #FIXME: do we need to release for picam??
 
     @property
     def name(self):
@@ -308,6 +307,7 @@ class Camera:
         - For model *ascom*, a driver name may be specified if known, (i.e. DSLR, ASICamera1, ASICamera2, Simulator,
         QHYCCD, QHYCCD_GUIDER, QHYCCD_CAM2, AtikCameras, AtikCameras2, etc), otherwise the ASCOM driver
         selector will open.
+        - For model *picam*, maybe we can specify the camera CSI port?
         """
         return self._identity
     @identity.setter
@@ -419,6 +419,21 @@ class Camera:
             self._log_debug('Specified identity: "'+str(self.identity)+'" ['+str(len(self.identity))+']')
             #ascom_camera = None
 
+        #implementing def identity for picam
+        elif self.model.lower() == 'picam':
+            self._log_debug('Checking PiCam camera identity and availability')
+            try:
+                self._picam_camera = PiCamera()
+            except:
+                raise RuntimeError #not sure if this is even the correct error
+
+            if identity is None:
+                self._log_debug('No identity chosen, default to 0, proceeding...') #identity is not used since we willbe using 1 camera anyways so picamera() shld be sufficient
+                self._identity = identity
+            else:
+                self._log_debug('Cool identity, proceeding...') #identity is not used since we willbe using 1 camera anyways so picamera() shld be sufficient
+                self._identity = identity
+
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -437,6 +452,12 @@ class Camera:
             init = hasattr(self,'_ascom_camera') and self._ascom_camera is not None and self._ascom_camera.Connected
             return init
             #FIXME: bypassed this because camera preserves .Connected state when GUI restarts without disconnecting
+        
+        ''' 
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -807,6 +828,12 @@ class Camera:
         elif self.model.lower() == 'ascom':
             return ('flip_x', 'flip_y', 'rotate_90', 'plate_scale', 'rotation', 'binning', 'size_readout',\
                      'gain', 'exposure_time')           
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -825,6 +852,12 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('Using ASCOM camera. Will flip the received image array ourselves: ' +str(self._flipX))
             return self._flipX            
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -860,6 +893,11 @@ class Camera:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
 
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
     @property
     def flip_y(self):
         """bool: Get or set if the image Y-axis should be flipped. Default is False."""
@@ -874,6 +912,11 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('Using ASCOM camera. Will flip the received image array ourselves: ' +str(self._flipX))
             return self._flipY
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -905,6 +948,11 @@ class Camera:
             self._log_debug('Using ASCOM camera. Will flip the received image array ourselves.')
             self._flipY = flip
             self._log_debug('_flipY set to: '+str(self._flipY))
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -914,7 +962,7 @@ class Camera:
         """int: Get or set how many times the image should be rotated by 90 degrees. Applied *after* flip_x and flip_y.
         """
         assert self.is_init, 'Camera must be initialised'
-        if self.model.lower() in ('ptgrey','zwoasi','ascom'):
+        if self.model.lower() in ('ptgrey','zwoasi','ascom'): #add picam in here
             return self._rot90
         else:
             self._log_warning('Forbidden model string defined.')
@@ -924,7 +972,7 @@ class Camera:
         self._log_debug('Set rot90 called with: '+str(k))
         assert self.is_init, 'Camera must be initialised'
         k = int(k)
-        if self.model.lower() in ('ptgrey','zwoasi','ascom'):
+        if self.model.lower() in ('ptgrey','zwoasi','ascom'): #add picam in here
             self._log_debug('Will rotate the received image array ourselves.')
             self._rot90 = k
             self._log_debug('rot90 set to: '+str(self._rot90))
@@ -983,6 +1031,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('frame_rate_auto not supported in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1011,6 +1063,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('frame_rate_auto not supported in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1038,6 +1094,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('frame_rate_auto not supported in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1063,6 +1123,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('frame rate not supported in ASCOM camera class')
             return 0
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1095,6 +1159,10 @@ class Camera:
                         raise #Rethrows error
         elif self.model.lower() == 'ascom':
             self._log_debug('frame rate not supported in ASCOM camera class')
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1136,6 +1204,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('auto gain not implemented in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1176,6 +1248,10 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('auto gain not implemented in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1209,6 +1285,10 @@ class Camera:
             return (min, max)
         elif self.model.lower() == 'ascom':
             return (self._ascom_camera.GainMin, self._ascom_camera.GainMax)
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1235,6 +1315,10 @@ class Camera:
             return self._zwoasi_camera.get_control_value(zwoasi.ASI_GAIN)[0]
         elif self.model.lower() == 'ascom':
             return self._ascom_camera.Gain
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1273,6 +1357,10 @@ class Camera:
                 self._log_debug('Requested gain out of allowable range ('+str(self._ascom_camera.GainMin)+':'+str(self._ascom_camera.GainMax)+').')
                 raise AssertionError('Requested gain ['+str(gain)+'] out of allowable range ('+str(self._ascom_camera.GainMin)+' - '+str(self._ascom_camera.GainMax)+').')
             self._ascom_camera.Gain = gain
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1309,6 +1397,11 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('auto exposure not implemented in ASCOM')
             return False
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1349,6 +1442,11 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('auto exposure not implemented in ASCOM')
             return 0
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1382,6 +1480,11 @@ class Camera:
             return (min/1000, max/1000)
         elif self.model.lower() == 'ascom':
             return self._ascom_camera.ExposureMin, self._ascom_camera.ExposureMax
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1409,6 +1512,11 @@ class Camera:
         elif self.model.lower() == 'ascom':
             self._log_debug('Returning '+str(self._exposure_sec*1000))
             return self._exposure_sec*1000
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1449,7 +1557,10 @@ class Camera:
                 self._log_debug('Exposure time out of allowable range ('+str(self._ascom_camera.ExposureMin)+':'+str(self._ascom_camera.ExposureMax))
                 raise AssertionError('Requested exposure time ['+str(exposure_sec)+'] out of allowable range.')                
             self._exposure_sec = exposure_ms/1000
-            
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''    
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1492,6 +1603,10 @@ class Camera:
                 return val_horiz
             except PySpin.SpinnakerException:
                 self._log_warning('Failed to read binning property', exc_info=True)
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1564,6 +1679,11 @@ class Camera:
             #bin_scaling = new_bin/initial_bin
             #new_size = [round(sz/bin_scaling) for sz in initial_size]
             #self._log_debug('New binning and new size to set: '+str(new_bin)+' ,'+str(new_size))
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1600,6 +1720,11 @@ class Camera:
             return self._zwoasi_property['IsColorCam'] and self._color_bin
         elif self.model.lower() == 'ascom':
             return False
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1617,6 +1742,10 @@ class Camera:
             self._log_debug('Set color bin to: ' + str(self._color_bin))
         elif self.model.lower() == 'ascom':
             raise RuntimeError('ascom cameras do not support color binning')
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')                                                                                
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1655,6 +1784,11 @@ class Camera:
                 return (val_w, val_h)
             except:
                 self._log_debug('Unable to read ASCOM camera max image dimensions', exc_info=True)
+        
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1695,6 +1829,11 @@ class Camera:
                 return (val_w, val_h)
             except:
                 self._log_debug('Unable to read ASCOM camera image dimensions', exc_info=True)
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1781,6 +1920,11 @@ class Camera:
                     raise AssertionError('Unable to set ASCOM camera image size.')
             except:
                 raise AssertionError('Unable to read ASCOM camera image size limits.')
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1827,6 +1971,11 @@ class Camera:
             return self._zwoasi_camera is not None and self._zwoasi_image_handler.is_running
         elif self.model.lower() == 'ascom':
             return self._ascom_camera.Connected and self._ascom_camera_imaging_handler._is_running
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1857,6 +2006,11 @@ class Camera:
 
         elif self.model.lower() == 'ascom':
             self._ascom_camera_imaging_handler.start_imaging_loop()
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
+        
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
@@ -1880,6 +2034,10 @@ class Camera:
             self._zwoasi_image_handler.stop()
         elif self.model.lower() == 'ascom':
             self._ascom_camera_imaging_handler.stop_imaging_loop()
+        '''
+        elif self.model.lower() == 'picam':
+
+        '''
         else:
             self._log_warning('Forbidden model string defined.')
             raise RuntimeError('An unknown (forbidden) model is defined: '+str(self.model))
