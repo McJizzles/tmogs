@@ -419,16 +419,20 @@ class Camera:
             self._log_debug('Specified identity: "'+str(self.identity)+'" ['+str(len(self.identity))+']')
             #ascom_camera = None
 
-        '''
+        #implementing def identity for picam
         elif self.model.lower() == 'picam':
             self._log_debug('Checking PiCam camera identity and availability')
             try:
                 self._picam_camera = PiCamera()
             except:
-                raise RuntimeError
-            
+                raise RuntimeError #not sure if this is even the correct error
 
-        '''
+            if identity is None:
+                self._log_debug('No identity chosen, default to 0, proceeding...') #identity is not used since we willbe using 1 camera anyways so picamera() shld be sufficient
+                self._identity = identity
+            else:
+                self._log_debug('Cool identity, proceeding...') #identity is not used since we willbe using 1 camera anyways so picamera() shld be sufficient
+                self._identity = identity
 
         else:
             self._log_warning('Forbidden model string defined.')
@@ -449,7 +453,7 @@ class Camera:
             return init
             #FIXME: bypassed this because camera preserves .Connected state when GUI restarts without disconnecting
         
-        '''
+        ''' 
         elif self.model.lower() == 'picam':
 
         '''
