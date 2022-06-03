@@ -39,6 +39,7 @@ from turtle import end_fill
 # External imports:
 import numpy as np
 import serial
+import picamera
 
 # Hardware support imports:
 import zwoasi
@@ -142,6 +143,9 @@ class Camera:
         self._ascom_driver_handler = None
         self._ascom_camera = None
         self._exposure_sec = 0.1
+        # #Only used for picam
+        # self._picam_camera = None
+
         #Callbacks on image event
         self._call_on_image = set()
         self._got_image_event = Event()
@@ -257,6 +261,8 @@ class Camera:
             self._ascom_camera = None
         self._log_debug('ASCOM camera hardware released')
 
+    #FIXME: do we need to release for picam??
+
     @property
     def name(self):
         """str: Get or set the name."""
@@ -301,6 +307,7 @@ class Camera:
         - For model *ascom*, a driver name may be specified if known, (i.e. DSLR, ASICamera1, ASICamera2, Simulator,
         QHYCCD, QHYCCD_GUIDER, QHYCCD_CAM2, AtikCameras, AtikCameras2, etc), otherwise the ASCOM driver
         selector will open.
+        - For model *picam*, maybe we can specify the camera CSI port?
         """
         return self._identity
     @identity.setter
@@ -414,6 +421,12 @@ class Camera:
 
         '''
         elif self.model.lower() == 'picam':
+            self._log_debug('Checking PiCam camera identity and availability')
+            try:
+                self._picam_camera = PiCamera()
+            except:
+                raise RuntimeError
+            
 
         '''
 
