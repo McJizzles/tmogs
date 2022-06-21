@@ -33,7 +33,7 @@ from pathlib import Path
 import logging
 import sys
 from threading import Thread, Event
-import pythoncom
+#import pythoncom #zwoasi requirement, not needed
 from time import sleep, perf_counter as precision_timestamp
 from datetime import datetime
 from csv import writer as csv_write

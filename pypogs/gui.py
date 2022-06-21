@@ -34,6 +34,7 @@ import numpy as np
 from pathlib import Path
 import logging
 import sys, os, traceback
+from cv2 import imread #ocean here testing
 
 COMMAND = 0
 MOUNT = 1
@@ -44,6 +45,8 @@ NONE = 0
 STAR_OL = 1
 COARSE_CCL = 2
 FINE_FCL = 3
+
+
 
 class GUI:
     """Create a Graphical User Interface which controls the given System.
@@ -98,6 +101,7 @@ class GUI:
         self.hardware_frame = HardwareFrame(self.root, self.sys, self.logger)
         self.hardware_frame.grid(row=0, column=0, columnspan=2, padx=10, pady=(10,0), sticky=tk.N)
         self.logger.debug('Loading LiveViewFrame')
+        self.logger.info('YO they loading the liveviewframe') #ocean here
         self.live_frame = LiveViewFrame(self.root, self.sys, self.logger)
         self.live_frame.grid(row=0, rowspan=2, column=2, padx=(0,10), pady=10)
         self.live_frame.start(gui_update_ms)
@@ -419,7 +423,7 @@ class TrackingControlFrame(ttk.Frame):
         except Exception as err:
             self.logger.debug('Could not set FCL enable', exc_info=True)
             ErrorPopup(self, err, self.logger)
-#        self.update()
+        self.update()
 
     def start_tracking_callback(self):
         if self.sys.mount is not None and self.sys.mount.is_init and self.sys.mount._is_sidereal_tracking:
@@ -500,6 +504,7 @@ class LiveViewFrame(ttk.Frame):
         self.logger.debug('Filling bottom frame with interactive controls')
         ttk.Label(self.bottom_frame1, text='Camera (Tracker):').grid(row=0, column=0)
         self.camera_variable = tk.IntVar()
+        
         self.camera_variable.set(NONE)
         ttk.Radiobutton(self.bottom_frame1, text='None', variable=self.camera_variable, value=NONE) \
                 .grid(row=0, column=1, padx=(5,0))
@@ -780,16 +785,28 @@ class LiveViewFrame(ttk.Frame):
     def update(self):
         """Update the canvas with an image"""
         self.logger.debug('LiveViewFrame got update request')
+        self.logger.info('HOLYYYYYY LiveViewFrame got update request WHATTTT')
         # Read desired camera
         cam = self.camera_variable.get()
         self.logger.debug('Selected camera is {} (1 star, 2 coarse, 3 fine, 0 none)'.format(cam))
+        self.logger.info('cam {} selected YUSSSSS'.format(cam)) #ocean 
         # Check if we have it, otherwise switch to none
         if cam == STAR_OL and (self.sys.star_camera is None or not self.sys.star_camera.is_init): cam = NONE
         if cam == COARSE_CCL and (self.sys.coarse_camera is None or not self.sys.coarse_camera.is_init): cam = NONE
         if cam == FINE_FCL and (self.sys.fine_camera is None or not self.sys.fine_camera.is_init): cam = NONE
+        if cam == STAR_OL and (self.sys.star_camera is None or not self.sys.star_camera.is_init):
+            self.logger.info('somethings wrong lol') #ocean 
+        else:
+            self.logger.info('somethings right lol') #ocean 
         self.logger.debug('After validity checks setting camera to {}'.format(cam))
         self.camera_variable.set(cam)
-        img = None
+        #pepe = imread("/home/pi/tmogs_python/tmogs/pypogs/pepe/pepe_sadge.jpg") #ocean here this is to show pepe
+        #static = np.random.randint(low=0,high=255,size=(640,480)) #ocean here this is to show static
+        #img = pepe
+        img = None #ocean here this is default here one, dont delete
+        #print(img) #ocean here this is to show the array of rgb/bgr of the img idk which one prob bgr
+        
+        self.logger.info('thanks akshat') #ocean here
         goal_pos = (None, None)
         offset_pos = (None, None)
         plate_scale = None
@@ -802,9 +819,11 @@ class LiveViewFrame(ttk.Frame):
         exposure = None
         if cam == STAR_OL:
             self.logger.debug('Trying to get star OL data')
+            self.logger.info('Trying to get star OL data') #ocean here 
             try:
                 if not self.sys.star_camera.is_running: self.sys.star_camera.start()
-                img = self.sys.star_camera.get_latest_image()
+                img = self.sys.star_camera.get_latest_image() 
+                # img = pepe
                 plate_scale = self.sys.star_camera.plate_scale
                 rotation = self.sys.star_camera.rotation
                 goal_pos = self.sys.control_loop_thread.OL_goal_x_y
@@ -815,6 +834,7 @@ class LiveViewFrame(ttk.Frame):
                     self.logger.debug('Could not get offset', exc_info=True)
             except:
                 self.logger.debug('Failed', exc_info=True)
+            self.logger.info('pepe PLS PLS PLS') #ocean
         elif cam == COARSE_CCL:
             self.logger.debug('Trying to get coarse CCL data')
             try:
@@ -855,7 +875,8 @@ class LiveViewFrame(ttk.Frame):
                 exposure = self.sys.fine_camera.exposure_time
             except:
                 self.logger.debug('Failed', exc_info=True)
-
+        self.logger.info('helo') #ocean
+        self.logger.info(img) #ocean
         if img is not None:
             zoom = self.zoom_variable.get()
             (height, width) = img.shape[0:2]
@@ -863,10 +884,13 @@ class LiveViewFrame(ttk.Frame):
             offs_y = round(height / 2 * (1 - 1/zoom))
             width = width//zoom
             height = height//zoom
+            self.logger.info('half step closer to pepe') #ocean
             try:
                 img = img[offs_y:offs_y+height, offs_x:offs_x+width]
             except:
                 self.logger.warning('Failed to zoom image')
+            finally:
+                self.logger.info('one step closer to pepe') #ocean
 
         #self.logger.debug('Setting image to: ' + str(img))
         if img is not None:
@@ -893,9 +917,10 @@ class LiveViewFrame(ttk.Frame):
             self.logger.debug('Resizing image to: ' + str(self.image_size))
             pil_img = pil_img.resize(self.image_size, resample=Image.NEAREST)
             # Set canvas image (must keep reference to image, otherwise will be garbage collected)
-            self.tk_image = ImageTk.PhotoImage(image=pil_img)
+            self.tk_image = ImageTk.PhotoImage(image=pil_img) 
             if self.canvas_image is None:
                 self.logger.debug('Creating image on canvas')
+                self.logger.info('IMAGE ON CANVAS YO') #ocean
                 self.canvas_image = self.canvas.create_image(0, 0, image=self.tk_image, anchor=tk.NW)
             else:
                 self.canvas.itemconfig(self.canvas_image, image=self.tk_image)
@@ -1117,6 +1142,7 @@ class HardwareFrame(ttk.Frame):
     def update(self):
         """Update the status of all buttons."""
         self.logger.debug('HardwareFrame got update request')
+        self.logger.info('HardwareFrame got update request')
         # Mount
         if self.sys.mount is None:
             ttk.Style().configure('mount.TButton',\
@@ -1194,10 +1220,11 @@ class HardwareFrame(ttk.Frame):
 
     def star_callback(self):
         self.logger.debug('HardwareFrame star button clicked')
+        self.logger.info('OCEAN HI HardwareFrame star button clicked') #yo ocean here
         try:
             if self.star_popup is None:
                 self.star_popup = self.HardwarePopup(self, 'camera', self.sys.star_camera, self.sys.add_star_camera, \
-                                                     self.sys.clear_star_camera, title='Star camera', \
+                                                     self.sys.clear_star_camera, title='Star camera lolol', \
                                                      default_name='StarCamera', link_device=self.sys.coarse_camera, \
                                                      link_func=self.sys.add_coarse_camera_from_star)
             else:
@@ -1320,6 +1347,7 @@ class HardwareFrame(ttk.Frame):
 
         def update(self):
             self.logger.debug('HardwarePopup got update request')
+            self.logger.info('HardwarePopup got update request lmao') #ocean here
             #self.model_entry.delete(0, 'end')
             #self.identity_entry.delete(0, 'end')
             #self.name_entry.delete(0, 'end')
@@ -1349,6 +1377,7 @@ class HardwareFrame(ttk.Frame):
             self.update()
 
         def connect_callback(self):
+            self.logger.info('HardwarePopup connect button clicked') # ocean checking for if this runs
             self.logger.debug('HardwarePopup connect button clicked')
             # Read the entries
             model = self.model_combo.get()
@@ -1837,7 +1866,7 @@ class AlignmentFrame(ttk.Frame):
             self.logger = master.logger
             self.title('Location')
             self.resizable(False, False)
-#            self.grab_set() #Grab control
+            # self.grab_set() #Grab control
             try:
                 (old_lat, old_lon, old_height) = master.sys.alignment.get_location_lat_lon_height()
             except AssertionError:

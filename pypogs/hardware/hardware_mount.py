@@ -30,7 +30,7 @@ import logging
 from time import sleep, time as timestamp
 from datetime import datetime
 from threading import Thread, Event
-import pythoncom
+#import pythoncom #zwoasi requirement, not needed
 from struct import pack as pack_data
 from enum import Enum
 

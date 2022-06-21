@@ -282,16 +282,22 @@ class System:
     def initialize(self):
         """Initialise cameras, mount, and receiver if they are not already."""
         self._logger.debug('Initialise called')
+        self._logger.info('Initialise called ocean') #ocean checking 
         if self.star_camera is not None:
+            self._logger.info('Has star cam ocean') #ocean checking 
             self._logger.debug('Has star cam')
+            if self.star_camera.is_init:
+                self._logger.info('lesgooooo')  #ocean checking 
             if not self.star_camera.is_init:
                 try:
                     self.star_camera.initialize()
                     self._logger.debug('Initialised')
+                    self._logger.info('Initialised ocean') #ocean checking 
                 except BaseException:
                     self._logger.warning('Failed to init', exc_info=True)
             else:
                 self._logger.debug('Already initialised')
+                self._logger.info('Already initialised helo')  #ocean checking 
         if self.coarse_camera is not None:
             self._logger.debug('Has coarse cam')
             if not self.coarse_camera.is_init:
@@ -531,6 +537,7 @@ class System:
                 Camera and auto_init is True (the default), Camera.initialize() will be called
                 after creation.
         """
+        self._logger.info('we adding star') #ocean
         self._logger.debug('Got add star camera with model=' + str(model)
                            + ' identity='+str(identity) + ' auto_init=' + str(auto_init))
         if self.star_camera is not None:
